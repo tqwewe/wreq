@@ -23,6 +23,11 @@ use tokio_tungstenite::tungstenite::{
     self,
     protocol::{self, CloseFrame, WebSocketConfig},
 };
+#[cfg(feature = "deflate")]
+use tokio_tungstenite::tungstenite::extensions::{
+    ExtensionsConfig,
+    compression::deflate::DeflateConfig,
+};
 
 use self::message::{CloseCode, Message, Utf8Bytes};
 use crate::{
@@ -40,6 +45,8 @@ pub struct WebSocketRequestBuilder {
     accept_key: Option<Cow<'static, str>>,
     protocols: Option<Vec<Cow<'static, str>>>,
     config: WebSocketConfig,
+    #[cfg(feature = "deflate")]
+    permessage_deflate: bool,
 }
 
 impl WebSocketRequestBuilder {
@@ -50,6 +57,8 @@ impl WebSocketRequestBuilder {
             accept_key: None,
             protocols: None,
             config: WebSocketConfig::default(),
+            #[cfg(feature = "deflate")]
+            permessage_deflate: false,
         }
     }
 
@@ -362,6 +371,26 @@ impl WebSocketRequestBuilder {
         self
     }
 
+    /// Sets if this request will announce that it accepts deflate encoding.
+    #[cfg(feature = "deflate")]
+    #[inline]
+    pub fn deflate(mut self) -> Self {
+        self.inner = self.inner.deflate(true);
+        self
+    }
+
+    /// Enables WebSocket per-message deflate compression (permessage-deflate extension).
+    ///
+    /// When enabled, the client will offer permessage-deflate compression during the
+    /// WebSocket handshake. If the server accepts, messages will be compressed/decompressed
+    /// automatically.
+    #[cfg(feature = "deflate")]
+    #[inline]
+    pub fn permessage_deflate(mut self) -> Self {
+        self.permessage_deflate = true;
+        self
+    }
+
     /// Sends the request and returns and [`WebSocketResponse`].
     pub async fn send(self) -> Result<WebSocketResponse, Error> {
         let (client, request) = self.inner.build_split();
@@ -441,6 +470,18 @@ impl WebSocketRequestBuilder {
             }
         }
 
+        // Set websocket extensions (permessage-deflate)
+        #[cfg(feature = "deflate")]
+        if self.permessage_deflate {
+            request.headers_mut().insert(
+                header::SEC_WEBSOCKET_EXTENSIONS,
+                HeaderValue::from_static("permessage-deflate; client_max_window_bits"),
+            );
+        }
+
+        #[cfg(feature = "deflate")]
+        let permessage_deflate = self.permessage_deflate;
+
         client
             .execute(request)
             .await
@@ -449,6 +490,8 @@ impl WebSocketRequestBuilder {
                 accept_key,
                 protocols: self.protocols,
                 config: self.config,
+                #[cfg(feature = "deflate")]
+                permessage_deflate,
             })
     }
 }
@@ -463,6 +506,8 @@ pub struct WebSocketResponse {
     accept_key: Option<Cow<'static, str>>,
     protocols: Option<Vec<Cow<'static, str>>>,
     config: WebSocketConfig,
+    #[cfg(feature = "deflate")]
+    permessage_deflate: bool,
 }
 
 impl Deref for WebSocketResponse {
@@ -561,11 +606,55 @@ impl WebSocketResponse {
                 (None, None) => {}
             };
 
+            // Check if server accepted permessage-deflate and configure accordingly
+            #[allow(unused_mut)]
+            let mut config = self.config;
+            #[cfg(feature = "deflate")]
+            {
+                if self.permessage_deflate {
+                    // Check if server accepted deflate
+                    if let Some(ext_header) = headers
+                        .get(header::SEC_WEBSOCKET_EXTENSIONS)
+                        .and_then(|v| v.to_str().ok())
+                    {
+                        if ext_header.contains("permessage-deflate") {
+                            // Parse server's extension parameters
+                            let mut deflate_config = DeflateConfig::default();
+
+                            // Check for server_no_context_takeover
+                            if ext_header.contains("server_no_context_takeover") {
+                                deflate_config.server_no_context_takeover = true;
+                            }
+
+                            // Check for client_no_context_takeover
+                            if ext_header.contains("client_no_context_takeover") {
+                                deflate_config.client_no_context_takeover = true;
+                            }
+
+                            // Parse client_max_window_bits if present
+                            // Format: client_max_window_bits=15
+                            if let Some(idx) = ext_header.find("client_max_window_bits=") {
+                                let start = idx + "client_max_window_bits=".len();
+                                if let Some(bits_str) = ext_header[start..].split(|c| c == ';' || c == ',').next() {
+                                    if let Ok(bits) = bits_str.trim().parse::<u8>() {
+                                        let _ = deflate_config.set_max_window_bits(protocol::Role::Client, bits);
+                                    }
+                                }
+                            }
+
+                            let mut ext_config = ExtensionsConfig::default();
+                            ext_config.permessage_deflate = Some(deflate_config);
+                            config.extensions = ext_config;
+                        }
+                    }
+                }
+            }
+
             let upgraded = self.inner.upgrade().await?;
             let inner = WebSocketStream::from_raw_socket(
                 upgraded,
                 protocol::Role::Client,
-                Some(self.config),
+                Some(config),
             )
             .await;
 
