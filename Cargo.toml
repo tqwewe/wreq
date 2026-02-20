@@ -143,7 +143,7 @@ tokio-util = { version = "0.7.17", default-features = false, optional = true }
 tokio-socks = { version = "0.5.2", optional = true }
 
 ## websocket
-tokio-tungstenite = { git = "https://github.com/tqwewe/tokio-tungstenite", branch = "defalte-ws", default-features = false, features = [
+tokio-tungstenite = { git = "https://github.com/tqwewe/tokio-tungstenite", branch = "deflate-ws", default-features = false, features = [
     "handshake",
 ], optional = true }
 
